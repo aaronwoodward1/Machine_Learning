@@ -1,0 +1,124 @@
+---
+title: "Tidy Tuesdays - Childcare costs: Tuning an xgboost model with early stopping"
+link: https://juliasilge.com/blog/childcare-costs/
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## GitHub Documents
+
+This is an R Markdown format used for publishing markdown documents to GitHub. When you click the **Knit** button all R code chunks are run and a markdown file (.md) suitable for publishing to GitHub is generated.
+
+
+```{r}
+library(tidyverse)
+
+childcare_costs <- read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-05-09/childcare_costs.csv')
+
+glimpse(childcare_costs)
+```
+```{r}
+childcare_costs |>
+  ggplot(aes(study_year, mcsa, group = study_year, fill =study_year)) +
+  geom_boxplot(alpha = 0.8, show.legend = FALSE) +
+  scale_fill_distiller(palette = "RdPu")
+```
+```{r}
+childcare_costs |>
+  ggplot(aes(mhi_2018, mcsa, color = flfpr_20to64)) +
+  geom_point(alpha = 0.5) +
+  scale_x_log10() +
+  scale_color_viridis_c()
+```
+```{r}
+childcare_costs |>
+  select(mcsa, starts_with("one_race"),mhi_2018) |>
+  select(-one_race) |>
+  pivot_longer(starts_with("one_race")) |>
+  ggplot(aes(value, mcsa, color = mhi_2018)) +
+  geom_point(alpha = 0.5) +
+  facet_wrap(vars(name), scales = "free_x") +
+  scale_color_viridis_c() +
+  labs(x = "% of population")
+```
+
+## Building a Model
+```{r}
+#library(tidymodels)
+
+set.seed(123)
+childcare_split <- childcare_costs |>
+  select(-matches("^mc_|^mfc")) |>
+  select(-county_fips_code) |>
+  na.omit() |>
+  initial_split(strata = mcsa)
+
+childcare_train <- training(childcare_split)
+childcare_test <- testing(childcare_split)
+
+set.seed(234)
+childcare_set <- validation_split(childcare_train)
+childcare_set
+```
+```{r}
+xgb_spec <-
+  boost_tree(
+    trees = 500,
+    min_n = tune(),
+    mtry = tune(),
+    stop_iter = tune(),
+    learn_rate = 0.01
+  ) |>
+  set_engine("xgboost", validation = 0.2) |>
+  set_mode("regression")
+
+xgb_wf <- workflow(mcsa ~ ., xgb_spec)
+xgb_wf
+```
+
+```{r}
+install.packages("xgboost")
+library(xgboost)
+```
+
+```{r}
+# Tuning across hyperparameter configurations using training set
+doParallel::registerDoParallel()
+set.seed(234)
+xgb_rs <- tune_grid(xgb_wf, childcare_set, grid = 15)
+```
+```{r}
+xgb_rs
+```
+
+## Evaluate results
+```{r}
+autoplot(xgb_rs)
+```
+```{r}
+show_best(xgb_rs, "rmse")
+```
+
+```{r}
+childcare_fit <- xgb_wf |>
+  finalize_workflow(select_best(xgb_rs, "rmse")) |>
+  last_fit(childcare_split)
+
+childcare_fit
+```
+```{r}
+#How did our model perform?
+collect_metrics(childcare_fit)
+```
+```{r}
+#Most important features of the model
+library(vip)
+
+extract_workflow(childcare_fit) |>
+  extract_fit_parsnip() |>
+  vip(num_features = 15, geom ="point")
+```
+
